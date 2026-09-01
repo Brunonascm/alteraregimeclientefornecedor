@@ -3,19 +3,29 @@ import pandas as pd
 import io
 import os
 
-st.set_page_config(page_title="Atualizador de Regime Apuração Fornecedores - Domínio", layout="wide")
+st.set_page_config(page_title="Atualizador de Regime - Domínio", layout="wide")
 
 # Código IBGE padrão de contingência (São Paulo - SP)
 CODIGO_IBGE_PADRAO = "3550308"
 
-# Opções oficiais exigidas pelo leiaute da Domínio
-REGIME_OPTIONS = {
+# Opções oficiais para Fornecedores (Reg. 0020)
+REGIME_OPTIONS_FORNECEDORES = {
     "N": "N - Normal",
     "M": "M - ME",
     "E": "E - EPP",
     "O": "O - Outros",
     "S": "S - ME - Simples Nacional",
     "P": "P - EPP - Simples Nacional",
+    "U": "U - Imune",
+    "I": "I - Isenta"
+}
+
+# Opções oficiais para Clientes (Reg. 0010) - Não aceita 'S' nem 'P'
+REGIME_OPTIONS_CLIENTES = {
+    "N": "N - Normal",
+    "M": "M - ME",
+    "E": "E - EPP",
+    "O": "O - Outros",
     "U": "U - Imune",
     "I": "I - Isenta"
 }
@@ -34,10 +44,6 @@ def normalizar_codigo(codigo):
 
 # --- FUNÇÃO SILENCIOSA DE LEITURA DE MUNICÍPIOS ---
 def ler_municipios_silencioso():
-    """
-    Busca o Municipios.txt na pasta do script de forma silenciosa.
-    Mapeia: Coluna 1 (Índice 0) -> Código Interno | Coluna 5 (Índice 4) -> IBGE
-    """
     municipio_map = {}
     diretorio_atual = os.path.dirname(os.path.abspath(__file__))
     caminho_arquivo = os.path.join(diretorio_atual, "Municipios.txt")
@@ -52,11 +58,11 @@ def ler_municipios_silencioso():
                     colunas = linha_limpa.split("\t")
                     if len(colunas) >= 5:
                         id_interno = normalizar_codigo(colunas[0])
-                        codigo_ibge = colunas[4].strip()  # 5ª coluna (Índice 4)
+                        codigo_ibge = colunas[4].strip()
                         if id_interno and codigo_ibge:
                             municipio_map[id_interno] = codigo_ibge
         except:
-            pass  # Falha silenciosa
+            pass
     return municipio_map
 
 
@@ -65,21 +71,29 @@ mapa_municipios = ler_municipios_silencioso()
 
 
 # --- TÍTULO PRINCIPAL ---
-st.title("🔄 Atualizador em Lote: Regime de Apuração (Reg. 0020 - Domínio)")
+st.title("🔄 Atualizador em Lote: Regime de Apuração (Domínio)")
 st.write(
-    "Carregue o arquivo TXT gerado na Domínio, altere os regimes em lote, via Excel ou individualmente, "
-    "e gere o arquivo formatado em **Registro 0020 (Pipe |)** para importar na Domínio."
+    "Carregue o arquivo TXT extraído do SQL, altere os regimes em lote, via Excel ou individualmente, "
+    "e gere o arquivo final formatado no **Leiaute Padrão de Importação (Separado por Pipe |)**."
 )
 
+# --- SELETOR DE MÓDULO ---
+tipo_registro = st.radio(
+    "Escolha o tipo de cadastro que deseja processar:",
+    options=["Clientes (Reg. 0010)", "Fornecedores (Reg. 0020)"],
+    horizontal=True
+)
+
+# Define o conjunto correto de opções de regime para a tela
+regime_options_atual = REGIME_OPTIONS_CLIENTES if tipo_registro == "Clientes (Reg. 0010)" else REGIME_OPTIONS_FORNECEDORES
+
 # Upload do arquivo original do SQL
-uploaded_file = st.file_uploader("1️⃣ Selecione o arquivo TXT do SQL", type=["txt"])
+uploaded_file = st.file_uploader(f"1️⃣ Selecione o arquivo TXT do SQL de {tipo_registro}", type=["txt"])
 
 # --- PROCESSAMENTO DO ARQUIVO SQL ---
 if uploaded_file is not None:
-    # Identificador único do arquivo para controle de estado
-    file_key = f"{uploaded_file.name}_{uploaded_file.size}"
+    file_key = f"{tipo_registro}_{uploaded_file.name}_{uploaded_file.size}"
     
-    # Se for um arquivo novo, inicializa o Session State
     if "current_file_key" not in st.session_state or st.session_state.current_file_key != file_key:
         st.session_state.current_file_key = file_key
         
@@ -97,7 +111,7 @@ if uploaded_file is not None:
                 continue
                 
             cols = line.split("\t")
-            if idx == 0 and "codi_emp" in cols[0].lower():
+            if idx == 0 and ("codi_emp" in cols[0].lower() or "efclientes" in cols[0].lower()):
                 continue
                 
             def get_val(index, default=""):
@@ -110,82 +124,144 @@ if uploaded_file is not None:
                     return val
                 return default
 
-            cnpj_cpf = get_val(11)
-            razao_social = get_val(5)
-            
-            if not cnpj_cpf or not razao_social:
-                continue
+            # --- MAPEAR BASEADO NO TIPO DE REGISTRO ---
+            if tipo_registro == "Clientes (Reg. 0010)":
+                cnpj_cpf = get_val(11)       # efclientes.cgce_cli
+                razao_social = get_val(5)    # efclientes.nomr_cli
+                if not cnpj_cpf or not razao_social:
+                    continue
+                
+                raw_date = get_val(30)       # efclientes.CADASTRO_CLI
+                
+                # Tratamento de Regime para Clientes (Converte S -> M e P -> E automaticamente)
+                regime_atual = get_val(24).upper()
+                if regime_atual == "S":
+                    regime_atual = "M"
+                elif regime_atual == "P":
+                    regime_atual = "E"
+                
+                codm_interno = get_val(27) if get_val(27) else get_val(4)
+                
+                # Órgão público federal / Natureza jurídica - padrão '7' (Empresa Privada)
+                orgao_pub = get_val(25)
+                if not orgao_pub or orgao_pub not in ["1", "2", "3", "4", "5", "6", "7", "8", "9"]:
+                    orgao_pub = "7"
+                
+                possui_inter = get_val(33).upper() # efclientes.POSSUI_INTERDEPENDENCIA_CLI
+                if possui_inter not in ["S", "N"]:
+                    possui_inter = "N"
 
-            # Tratamento de Data
-            raw_date = get_val(30)
-            formatted_date = ""
-            if raw_date:
-                raw_date_clean = raw_date.split(" ")[0]
-                if "-" in raw_date_clean:
-                    parts = raw_date_clean.split("-")
-                    if len(parts) == 3:
-                        formatted_date = f"{parts[2]}/{parts[1]}/{parts[0]}"
-                else:
-                    formatted_date = raw_date_clean
+                insc_paa = get_val(43).upper() # efclientes.INSCRITO_PROGRAMA_AQUISICAO_ALIMENTOS_CLI
+                if insc_paa not in ["S", "N"]:
+                    insc_paa = "N"
 
-            # Regime Inicial
-            regime_atual = get_val(25).upper()
-            if regime_atual not in REGIME_OPTIONS:
-                regime_atual = "N"
+                agro_ent = get_val(15).upper()
+                if agro_ent not in ["S", "N"]:
+                    agro_ent = "N"
 
-            # Tratativa Silenciosa do Município (Código Interno -> IBGE)
-            codm_for_3 = get_val(3)
-            codm_for_27 = get_val(27)
-            codm_for_interno = codm_for_27 if codm_for_27 else codm_for_3
-            
-            chave_busca = normalizar_codigo(codm_for_interno)
-            if mapa_municipios and chave_busca in mapa_municipios:
-                codigo_municipio_final = mapa_municipios[chave_busca]
+                icms_ent = get_val(16).upper()
+                if icms_ent not in ["S", "N"]:
+                    icms_ent = "N"
+
+                parsed_data.append({
+                    "codigo_entidade": get_val(1),
+                    "cgce_entidade": cnpj_cpf,
+                    "nomr_entidade": razao_social,
+                    "nome_entidade": get_val(6),
+                    "ende_entidade": get_val(7),
+                    "nume_entidade": get_val(8),
+                    "complemento_entidade": get_val(29),
+                    "bair_entidade": get_val(21),
+                    "codm_interno": codm_interno,
+                    "sigl_est": get_val(2),
+                    "codigo_pais": get_val(26),
+                    "cepe_entidade": get_val(10),
+                    "insc_entidade": get_val(12),
+                    "imun_entidade": get_val(20),
+                    "insc_suframa": get_val(28),
+                    "dddf_entidade": get_val(18),
+                    "fone_entidade": get_val(13),
+                    "faxe_entidade": get_val(14),
+                    "cadastro_data": raw_date,
+                    "codi_cta": get_val(3),
+                    "agro_entidade": agro_ent,
+                    "regime_entidade": regime_atual,
+                    "icms_entidade": icms_ent,
+                    "aliq_cli": get_val(19),
+                    "categoria_estabel": get_val(23),
+                    "orgao_pub_federal": orgao_pub,
+                    "possui_interdependencia": possui_inter,
+                    "percentual_carga_media": get_val(39),
+                    "inscrito_paa": insc_paa,
+                    "tins_entidade": get_val(17),
+                    "sequencial_paj": get_val(48),
+                })
+                
             else:
-                codigo_municipio_final = CODIGO_IBGE_PADRAO  # Default contingência SP
+                # Fornecedores (Reg. 0020)
+                cnpj_cpf = get_val(11)       # effornecedores.cgce_for
+                razao_social = get_val(5)    # effornecedores.nomr_for
+                if not cnpj_cpf or not razao_social:
+                    continue
+                
+                raw_date = get_val(30)       # effornecedores.CADASTRO_FOR
+                regime_atual = get_val(25).upper()
+                codm_interno = get_val(27) if get_val(27) else get_val(3)
 
-            parsed_data.append({
-                "codi_emp": get_val(0),
-                "codi_for": get_val(1),
-                "sigl_est": get_val(2),
-                "codm_for_interno": codm_for_interno,
-                "codi_cta": get_val(4),
-                "nomr_for": razao_social,
-                "nome_for": get_val(6),
-                "ende_for": get_val(7),
-                "nume_for": get_val(8),
-                "cida_for": get_val(9),
-                "cepe_for": get_val(10),
-                "cgce_for": cnpj_cpf,
-                "insc_for": get_val(12),
-                "fone_for": get_val(13),
-                "faxe_for": get_val(14),
-                "agro_for": get_val(15),
-                "icms_for": get_val(16),
-                "tins_for": get_val(17),
-                "dddf_for": get_val(18),
-                "imun_for": get_val(19),
-                "bair_for": get_val(20),
-                "categoria_estabel_for": get_val(22),
-                "iestst_for": get_val(23),
-                "email_for": get_val(24),
-                "regime_for": regime_atual,
-                "codigo_pais": get_val(26),
-                "codigo_municipio": codigo_municipio_final, # IBGE Correto salvo aqui
-                "insc_suframa": get_val(28),
-                "complemento_for": get_val(29),
-                "CADASTRO_FOR": formatted_date,
-                "CONTA_CLIENTE_FOR": get_val(31),
-                "POSSUI_INTERDEPENDENCIA_FOR": get_val(33),
-                "CONTRIBUINTE_CPRB_FOR": get_val(44),
-                "SEQUENCIAL_PAJ_FOR": get_val(47),
-            })
-            
+                possui_inter = get_val(33).upper()
+                if possui_inter not in ["S", "N"]:
+                    possui_inter = "N"
+
+                cprb_for = get_val(44).upper()
+                if cprb_for not in ["S", "N"]:
+                    cprb_for = "N"
+
+                agro_ent = get_val(15).upper()
+                if agro_ent not in ["S", "N"]:
+                    agro_ent = "N"
+
+                icms_ent = get_val(16).upper()
+                if icms_ent not in ["S", "N"]:
+                    icms_ent = "N"
+
+                parsed_data.append({
+                    "codigo_entidade": get_val(1),
+                    "cgce_entidade": cnpj_cpf,
+                    "nomr_entidade": razao_social,
+                    "nome_entidade": get_val(6),
+                    "ende_entidade": get_val(7),
+                    "nume_entidade": get_val(8),
+                    "complemento_entidade": get_val(29),
+                    "bair_entidade": get_val(20),
+                    "codm_interno": codm_interno,
+                    "sigl_est": get_val(2),
+                    "codigo_pais": get_val(26),
+                    "cepe_entidade": get_val(10),
+                    "insc_entidade": get_val(12),
+                    "imun_entidade": get_val(19),
+                    "insc_suframa": get_val(28),
+                    "dddf_entidade": get_val(18),
+                    "fone_entidade": get_val(13),
+                    "faxe_entidade": get_val(14),
+                    "cadastro_data": raw_date,
+                    "codi_cta": get_val(4),
+                    "agro_entidade": agro_ent,
+                    "regime_entidade": regime_atual,
+                    "icms_entidade": icms_ent,
+                    "categoria_estabel": get_val(22),
+                    "iestst_entidade": get_val(23),
+                    "email_entidade": get_val(24),
+                    "possui_interdependencia": possui_inter,
+                    "contribuinte_cprb": cprb_for,
+                    "sequencial_paj": get_val(47),
+                    "tins_entidade": get_val(17)
+                })
+
         st.session_state.df = pd.DataFrame(parsed_data)
 
     # Verifica se os dados estão na sessão
     if "df" in st.session_state and len(st.session_state.df) > 0:
-        st.success(f"✔️ {len(st.session_state.df)} fornecedores carregados com sucesso do arquivo SQL.")
+        st.success(f"✔️ {len(st.session_state.df)} registros carregados do SQL ({tipo_registro}).")
 
         # --- SEÇÃO EXCEL ROUNDTRIP (EXPORTAR / REIMPORTAR) ---
         st.subheader("📦 Integração com Excel")
@@ -193,18 +269,17 @@ if uploaded_file is not None:
         
         with col_ex1:
             st.write("Baixe a planilha para ajustar os regimes de forma massiva fora do sistema:")
-            # Gera Excel em memória
             excel_buffer = io.BytesIO()
-            excel_df = st.session_state.df[["codi_for", "cgce_for", "nomr_for", "regime_for"]].copy()
-            excel_df.columns = ["Código Fornecedor", "CNPJ_CPF", "Razão Social", "Regime de Apuração"]
+            excel_df = st.session_state.df[["codigo_entidade", "cgce_entidade", "nomr_entidade", "regime_entidade"]].copy()
+            excel_df.columns = ["Código", "CNPJ_CPF", "Nome_Razao_Social", "Regime de Apuração"]
             
             with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
                 excel_df.to_excel(writer, index=False, sheet_name="Regimes")
                 
             st.download_button(
-                label="📥 Baixar Relação em Excel (.xlsx)",
+                label=f"📥 Baixar Relação em Excel (.xlsx)",
                 data=excel_buffer.getvalue(),
-                file_name="relacao_fornecedores.xlsx",
+                file_name=f"relacao_{tipo_registro.split(' ')[0].lower()}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
             
@@ -217,137 +292,199 @@ if uploaded_file is not None:
                     excel_imported = pd.read_excel(uploaded_excel)
                     excel_imported.columns = [str(c).strip().lower() for c in excel_imported.columns]
                     
-                    # Localiza as colunas chave
                     col_id = None
                     col_regime = None
                     for c in excel_imported.columns:
-                        if 'codigo' in c or 'codi_for' in c:
+                        if 'codigo' in c or 'codi_' in c:
                             col_id = c
-                        if 'regime' in c or 'regime_for' in c:
+                        if 'regime' in c or 'regime_entidade' in c:
                             col_regime = c
                             
                     if col_id and col_regime:
-                        # Cria o dicionário de mapeamento {id_fornecedor: regime}
                         mapa_excel = {}
                         for _, row_ex in excel_imported.iterrows():
-                            id_for = normalizar_codigo(row_ex[col_id])
+                            id_ent = normalizar_codigo(row_ex[col_id])
                             reg_val = str(row_ex[col_regime]).strip().upper()
                             if reg_val:
-                                reg_val = reg_val[0] # Pega apenas a primeira letra (Ex: "S" de "S - ME")
-                            if reg_val in REGIME_OPTIONS:
-                                mapa_excel[id_for] = reg_val
+                                reg_val = reg_val[0]
+                            
+                            # Conversão para Clientes
+                            if "Clientes" in tipo_registro:
+                                if reg_val == "S": reg_val = "M"
+                                elif reg_val == "P": reg_val = "E"
+                            
+                            if reg_val in regime_options_atual:
+                                mapa_excel[id_ent] = reg_val
                                 
-                        # Atualiza o DataFrame principal na sessão
                         atualizados = 0
                         for idx, row_main in st.session_state.df.iterrows():
-                            id_main = normalizar_codigo(row_main["codi_for"])
+                            id_main = normalizar_codigo(row_main["codigo_entidade"])
                             if id_main in mapa_excel:
-                                st.session_state.df.at[idx, "regime_for"] = mapa_excel[id_main]
+                                st.session_state.df.at[idx, "regime_entidade"] = mapa_excel[id_main]
                                 atualizados += 1
                         
-                        st.success(f"✔️ Sucesso! {atualizados} regimes atualizados a partir do Excel.")
+                        st.success(f"✔️ Sucesso! {atualizados} regimes atualizados do Excel.")
                         st.rerun()
                     else:
-                        st.error("Erro: Colunas 'Código Fornecedor' e 'Regime de Apuração' não foram localizadas na planilha.")
+                        st.error("Erro: Colunas 'Código' e 'Regime de Apuração' não foram localizadas na planilha.")
                 except Exception as e:
                     st.error(f"Erro ao processar a planilha: {e}")
 
-        # --- SEÇÃO ALTERAÇÃO EM LOTE (STREAMLIT) ---
+        # --- SEÇÃO ALTERAÇÃO EM LOTE ---
         st.subheader("🛠️ Alteração Rápida em Lote")
         col_b1, col_b2 = st.columns([2, 1])
         
         with col_b1:
             regime_bulk = st.selectbox(
                 "Selecione o Regime de Apuração para aplicar a TODOS:",
-                options=list(REGIME_OPTIONS.keys()),
-                format_func=lambda x: REGIME_OPTIONS[x]
+                options=list(regime_options_atual.keys()),
+                format_func=lambda x: regime_options_atual[x]
             )
         with col_b2:
             st.write(" ")
             st.write(" ")
             if st.button("Aplicar a Todos"):
-                st.session_state.df["regime_for"] = regime_bulk
+                st.session_state.df["regime_entidade"] = regime_bulk
                 st.success("Regime alterado em todos os registros!")
                 st.rerun()
 
         # --- SEÇÃO TABELA EDITÁVEL ---
-        st.subheader("📝 Tabela de Fornecedores")
-        st.write("Você pode fazer ajustes manuais na tabela abaixo caso precise:")
-
-        # Tabela editável espelha o dataframe do session_state
+        st.subheader(f"📝 Tabela de {tipo_registro}")
+        
         edited_df = st.data_editor(
             st.session_state.df,
-            column_order=["codi_for", "cgce_for", "nomr_for", "regime_for"],
+            column_order=["codigo_entidade", "cgce_entidade", "nomr_entidade", "regime_entidade"],
             column_config={
-                "codi_for": st.column_config.TextColumn("Código Fornecedor", disabled=True),
-                "cgce_for": st.column_config.TextColumn("CNPJ / CPF", disabled=True),
-                "nomr_for": st.column_config.TextColumn("Nome / Razão Social", disabled=True),
-                "regime_for": st.column_config.SelectboxColumn(
+                "codigo_entidade": st.column_config.TextColumn("Código", disabled=True),
+                "cgce_entidade": st.column_config.TextColumn("CNPJ / CPF", disabled=True),
+                "nomr_entidade": st.column_config.TextColumn("Nome / Razão Social", disabled=True),
+                "regime_entidade": st.column_config.SelectboxColumn(
                     "Regime de Apuração",
-                    options=list(REGIME_OPTIONS.keys()),
-                    format_func=lambda x: REGIME_OPTIONS[x],
+                    options=list(regime_options_atual.keys()),
+                    format_func=lambda x: regime_options_atual[x],
                     required=True
                 )
             },
             width="stretch",
             num_rows="fixed",
-            key="fornecedores_editor"
+            key="entidades_editor"
         )
 
-        # --- SEÇÃO EXPORTAÇÃO REGISTRO 0020 ---
-        st.subheader("💾 Gerar Arquivo Domínio")
+        # --- SEÇÃO EXPORTAÇÃO REGISTRO ---
+        st.subheader("💾 Gerar Arquivo Domínio (Leiaute Padrão)")
         
-        if st.button("Gerar Arquivo de Importação (TXT)"):
+        nome_botao_txt = "Gerar Arquivo de Importação (TXT Clientes - Reg 0010)" if "Clientes" in tipo_registro else "Gerar Arquivo de Importação (TXT Fornecedores - Reg 0020)"
+        
+        if st.button(nome_botao_txt):
             output = io.StringIO()
             
-            # Varre o dataframe editado finalizado pelo usuário na tela
             for _, row in edited_df.iterrows():
-                line_fields = [
-                    "0020",                                                     # 1. Identificação do Registro
-                    row["cgce_for"],                                            # 2. CNPJ/CPF
-                    row["nomr_for"][:150],                                      # 3. Nome/Razão Social (Máx 150)
-                    row["nome_for"][:40] if row["nome_for"] else row["nomr_for"][:40], # 4. Nome Fantasia (Máx 40)
-                    row["ende_for"],                                            # 5. Endereço
-                    row["nume_for"],                                            # 6. Número do endereço
-                    row["complemento_for"],                                     # 7. Complemento
-                    row["bair_for"],                                            # 8. Bairro
-                    row["codigo_municipio"],                                    # 9. Código do município (IBGE Oficial, ex: 3550308!)
-                    row["sigl_est"],                                            # 10. UF
-                    row["codigo_pais"],                                         # 11. Código do País
-                    row["cepe_for"],                                            # 12. CEP
-                    row["insc_for"],                                            # 13. Inscrição Estadual
-                    row["imun_for"],                                            # 14. Inscrição Municipal
-                    row["insc_suframa"],                                        # 15. Inscrição Suframa
-                    row["dddf_for"],                                            # 16. DDD
-                    row["fone_for"],                                            # 17. Telefone
-                    row["faxe_for"],                                            # 18. FAX
-                    row["CADASTRO_FOR"],                                        # 19. Data do cadastro (DD/MM/YYYY)
-                    row["codi_cta"],                                            # 20. Conta contábil
-                    row["CONTA_CLIENTE_FOR"],                                   # 21. Conta contábil cliente
-                    row["agro_for"],                                            # 22. Agropecuário (S/N)
-                    "",                                                         # 23. Natureza jurídica
-                    row["regime_for"],                                          # 24. REGIME DE APURAÇÃO (Alterado!)
-                    row["icms_for"],                                            # 25. Contribuinte ICMS (S/N)
-                    "",                                                         # 26. Alíquota ICMS
-                    row["categoria_estabel_for"],                               # 27. Categoria do estabelecimento
-                    row["iestst_for"],                                          # 28. Inscrição Estadual ST
-                    row["email_for"],                                           # 29. Email
-                    row["POSSUI_INTERDEPENDENCIA_FOR"] if row["POSSUI_INTERDEPENDENCIA_FOR"] else "N", # 30. Interdependência
-                    row["CONTRIBUINTE_CPRB_FOR"] if row["CONTRIBUINTE_CPRB_FOR"] else "N",          # 31. CPRB
-                    row["SEQUENCIAL_PAJ_FOR"],                                  # 32. Processo
-                    row["tins_for"]                                             # 33. Tipo de inscrição
-                ]
+                # Tratamento de IBGE
+                chave_busca = normalizar_codigo(row["codm_interno"])
+                if mapa_municipios and chave_busca in mapa_municipios:
+                    codigo_municipio_final = mapa_municipios[chave_busca]
+                else:
+                    codigo_municipio_final = CODIGO_IBGE_PADRAO
+
+                # Tratamento de Data
+                raw_date = row["cadastro_data"]
+                formatted_date = ""
+                if raw_date:
+                    raw_date_clean = str(raw_date).split(" ")[0].strip()
+                    if "-" in raw_date_clean:
+                        parts = raw_date_clean.split("-")
+                        if len(parts) == 3:
+                            formatted_date = f"{parts[2]}/{parts[1]}/{parts[0]}"
+                    else:
+                        formatted_date = raw_date_clean
+
+                if "Clientes" in tipo_registro:
+                    # REGISTRO 0010 - EXATAMENTE 32 COLUNAS CONFORME MANUAL (SEM DESLOCAMENTOS)
+                    line_fields = [
+                        "0010",                                                     # 1. Identificação do Registro
+                        row["cgce_entidade"],                                       # 2. Inscrição (CNPJ/CPF)
+                        row["nomr_entidade"][:150],                                 # 3. Razão Social
+                        row["nome_entidade"][:40] if row["nome_entidade"] else row["nomr_entidade"][:40], # 4. Apelido
+                        row["ende_entidade"],                                       # 5. Endereço
+                        row["nume_entidade"],                                       # 6. Número do endereço
+                        row["complemento_entidade"],                                # 7. Complemento
+                        row["bair_entidade"],                                       # 8. Bairro
+                        codigo_municipio_final,                                     # 9. Código do município (IBGE)
+                        row["sigl_est"],                                            # 10. UF
+                        row["codigo_pais"] if row["codigo_pais"] else "1058",       # 11. Código do País
+                        row["cepe_entidade"],                                       # 12. CEP
+                        row["insc_entidade"],                                       # 13. Inscrição Estadual
+                        row["imun_entidade"],                                       # 14. Inscrição Municipal
+                        row["insc_suframa"],                                        # 15. Inscrição Suframa
+                        row["dddf_entidade"],                                       # 16. DDD
+                        row["fone_entidade"],                                       # 17. Telefone
+                        row["faxe_entidade"],                                       # 18. FAX
+                        formatted_date,                                             # 19. Data do cadastro
+                        row["codi_cta"],                                            # 20. Conta contábil cliente
+                        "",                                                         # 21. Conta contábil fornecedor (Vazio)
+                        row["agro_entidade"] if row["agro_entidade"] else "N",       # 22. Agropecuário (S/N)
+                        "7",                                                        # 23. Natureza jurídica / Órgão Público Federal (Default '7' = Empresa Privada)
+                        row["regime_entidade"],                                     # 24. Regime de apuração (Garante N, M, E, O, U, I)
+                        row["icms_entidade"] if row["icms_entidade"] else "N",       # 25. Contribuinte ICMS (S/N)
+                        row["aliq_cli"],                                            # 26. Alíquota ICMS
+                        row["categoria_estabel"],                                   # 27. Categoria do estabelecimento
+                        row["possui_interdependencia"] if row["possui_interdependencia"] else "N", # 28. Interdependência com a empresa (S/N)
+                        row["percentual_carga_media"],                              # 29. MT - Percentual Carga Média
+                        row["inscrito_paa"] if row["inscrito_paa"] else "N",        # 30. Inscrito no PAA (S/N)
+                        row["tins_entidade"],                                       # 31. Tipo Inscrição (1=CAEPF)
+                        row["sequencial_paj"]                                       # 32. Processo administrativo/judicial
+                    ]
+                    file_name = "IMPORTACAO_REGISTRO_0010.txt"
+                else:
+                    # REGISTRO 0020 - EXATAMENTE 33 COLUNAS CONFORME MANUAL (SEM DESLOCAMENTOS)
+                    line_fields = [
+                        "0020",                                                     # 1. Identificação do Registro
+                        row["cgce_entidade"],                                       # 2. Inscrição (CNPJ/CPF)
+                        row["nomr_entidade"][:150],                                 # 3. Razão Social
+                        row["nome_entidade"][:40] if row["nome_entidade"] else row["nomr_entidade"][:40], # 4. Apelido
+                        row["ende_entidade"],                                       # 5. Endereço
+                        row["nume_entidade"],                                       # 6. Número do endereço
+                        row["complemento_entidade"],                                # 7. Complemento
+                        row["bair_entidade"],                                       # 8. Bairro
+                        codigo_municipio_final,                                     # 9. Código do município (IBGE)
+                        row["sigl_est"],                                            # 10. UF
+                        row["codigo_pais"] if row["codigo_pais"] else "1058",       # 11. Código do País
+                        row["cepe_entidade"],                                       # 12. CEP
+                        row["insc_entidade"],                                       # 13. Inscrição Estadual
+                        row["imun_entidade"],                                       # 14. Inscrição Municipal
+                        row["insc_suframa"],                                        # 15. Inscrição Suframa
+                        row["dddf_entidade"],                                       # 16. DDD
+                        row["fone_entidade"],                                       # 17. Telefone
+                        row["faxe_entidade"],                                       # 18. FAX
+                        formatted_date,                                             # 19. Data do cadastro
+                        row["codi_cta"],                                            # 20. Conta contábil fornecedor
+                        "",                                                         # 21. Conta contábil cliente (Vazio)
+                        row["agro_entidade"] if row["agro_entidade"] else "N",       # 22. Agropecuário (S/N)
+                        "7",                                                        # 23. Natureza jurídica / Órgão Público Federal (Default '7' = Empresa Privada)
+                        row["regime_entidade"],                                     # 24. Regime de apuração (Garante N, M, E, O, S, P, U, I)
+                        row["icms_entidade"] if row["icms_entidade"] else "N",       # 25. Contribuinte ICMS (S/N)
+                        "",                                                         # 26. Alíquota ICMS (Vazio)
+                        row["categoria_estabel"],                                   # 27. Categoria do estabelecimento
+                        row["iestst_entidade"],                                     # 28. Inscrição Estadual ST
+                        row["email_entidade"],                                      # 29. Email
+                        row["possui_interdependencia"] if row["possui_interdependencia"] else "N", # 30. Interdependência com a empresa (S/N)
+                        row["contribuinte_cprb"] if row["contribuinte_cprb"] else "N", # 31. Contribuinte da CPRB (S/N)
+                        row["sequencial_paj"],                                      # 32. Processo administrativo/judicial
+                        row["tins_entidade"]                                        # 33. Tipo Inscrição (1=CAEPF)
+                    ]
+                    file_name = "IMPORTACAO_REGISTRO_0020.txt"
                 
-                # Une com Pipe "|"
-                output.write("|".join(line_fields) + "\n")
+                # Une com Pipe "|" tratando valores nulos e limpando espaços nas bordas
+                cleaned_line = [str(f).strip() if f is not None else "" for f in line_fields]
+                output.write("|".join(cleaned_line) + "\n")
             
-            # Converte em ANSI
+            # Codificação ANSI (CP1252) exigida pelo importador da Domínio
             file_data = output.getvalue().encode("cp1252", errors="replace")
             
             st.download_button(
-                label="📥 Baixar IMPORTACAO_REGISTRO_0020.txt",
+                label=f"📥 Baixar {file_name}",
                 data=file_data,
-                file_name="IMPORTACAO_REGISTRO_0020.txt",
+                file_name=file_name,
                 mime="text/plain"
             )
-            st.success("🎉 Arquivo Registro 0020 (com códigos IBGE corretos) gerado com sucesso!")
+            st.success(f"🎉 Arquivo {file_name} gerado com sucesso!")
