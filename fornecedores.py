@@ -3,7 +3,7 @@ import pandas as pd
 import io
 import os
 
-st.set_page_config(page_title="Atualizador de Regime - Domínio", layout="wide")
+st.set_page_config(page_title="Atualizador de Regime Apuração Fornecedores - Domínio", layout="wide")
 
 # Código IBGE padrão de contingência (São Paulo - SP)
 CODIGO_IBGE_PADRAO = "3550308"
@@ -67,7 +67,7 @@ mapa_municipios = ler_municipios_silencioso()
 # --- TÍTULO PRINCIPAL ---
 st.title("🔄 Atualizador em Lote: Regime de Apuração (Reg. 0020 - Domínio)")
 st.write(
-    "Carregue o arquivo TXT do SQL, altere os regimes em lote, via Excel ou individualmente, "
+    "Carregue o arquivo TXT gerado na Domínio, altere os regimes em lote, via Excel ou individualmente, "
     "e gere o arquivo formatado em **Registro 0020 (Pipe |)** para importar na Domínio."
 )
 
