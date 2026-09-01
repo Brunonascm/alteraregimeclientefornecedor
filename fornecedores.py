@@ -73,7 +73,7 @@ mapa_municipios = ler_municipios_silencioso()
 # --- TÍTULO PRINCIPAL ---
 st.title("🔄 Atualizador em Lote: Regime de Apuração (Domínio)")
 st.write(
-    "Carregue o arquivo TXT extraído do SQL, altere os regimes em lote, via Excel ou individualmente, "
+    "Carregue o arquivo TXT extraído da Domínio, altere os regimes em lote, via Excel ou individualmente, "
     "e gere o arquivo final formatado no **Leiaute Padrão de Importação (Separado por Pipe |)**."
 )
 
